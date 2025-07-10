@@ -1,267 +1,339 @@
 # IMPORT
 import discord
+from discord.ext import commands, tasks
+from discord import app_commands
 import os
 from dotenv import load_dotenv
 import asyncio
-import time
 import re
 from datetime import datetime
 import mysql.connector
+import yt_dlp
+from yt_dlp.utils import DownloadError
+import validators
 
-
-
-
-
-
-# OUTLINE
+# LOAD ENV AND INTENTS
 intents = discord.Intents.default()
 intents.message_content = True
 load_dotenv()
 
-client = discord.Client(intents=intents)
+# CONFIG
 operator = "("
 dm = False
 reminderCheckInterval = 20
 
-db = mysql.connector.connect(host=os.getenv("SQLHOST"), user=os.getenv("SQLUSER"), password=os.getenv("SQLPASS"), database=os.getenv("SQLDB"))
+# BOT SETUP
+bot = commands.Bot(command_prefix=operator, intents=intents, help_command=None)
+
+# DATABASE SETUP
+db = mysql.connector.connect(
+    host=os.getenv("SQLHOST"),
+    user=os.getenv("SQLUSER"),
+    password=os.getenv("SQLPASS"),
+    database=os.getenv("SQLDB")
+)
 cursor = db.cursor()
 
-
-
-# COMMANDS
+# COMMAND LIST
 commandList = {
-    "calendarset": "Make a repeating reminder message: {operator}calendarset {{UNIXTIMESTAMP}} {{INTERVAL}} {{MESSAGE}}",
-    "delmes": "Delete a reminder or error message by replying to it: {operator}delmes",
-    "curunix": "Print current unix timestamp",
-    "interval": "View how Intervals work information",
-    "help": "you're looking at it"
+    "calendarset": "Make a repeating reminder: '{operator}calendarset {UNIXTIMESTAMP} {INTERVAL} {MESSAGE}'",
+    "delmes": "Delete a reminder by replying to it.",
+    "curunix": "Print current Unix timestamp.",
+    "interval": "View interval formatting help.",
+    "findtime": "Convert UTC datetime to Unix: '{operator}findtime YYYY-MM-DD HH:MM'",
+    "help": "Show this help message.",
+    "play": "Play a YouTube audio stream in a voice channel: '{operator}play <URL>'",
+    "stop": "Stop playing music and leave the voice channel.",
+    "code": "Generate a gift link for a code (GI/HSR): '{operator}gift <gi|hsr> <CODE>'",
+    "gift": "Generate Hoyoverse gift links for GI or HSR: '{operator}gift <gi|hsr> <CODE1> [<CODE2> ...])'"
 }
 
-# MAIN
-@client.event
-async def on_message(message):
-    if message.author == client.user:
+# HELP COMMAND
+@bot.command()
+async def help(ctx):
+    help_message = "Available commands:\n"
+    for command, desc in commandList.items():
+        help_message += f"{command}: {desc.format(operator=operator)}\n"
+    await ctx.send(help_message)
+
+# CALENDAR SET
+@bot.command()
+async def calendarset(ctx, timestamp: int, interval: str, *, msg: str):
+    try:
+        unixValue = parseDuration(interval)
+        curTime = int(datetime.now().timestamp())
+
+        if timestamp < curTime - unixValue + 1:
+            await ctx.send("❌ Timestamp is too far in the past.", delete_after=5)
+            return
+        if unixValue < reminderCheckInterval:
+            await ctx.send(f"❌ Interval must be at least {reminderCheckInterval} seconds.")
+            return
+
+        reminder_msg = await ctx.send(f"{msg}: <t:{timestamp}:F> `(every {interval})`")
+        if dm:
+            try:
+                await ctx.author.send(f"Reminder set for <t:{timestamp}:F> repeating every {interval}: {msg}")
+            except:
+                await ctx.send("❌ Could not send you a DM.", delete_after=2)
+
+        cursor.execute("""
+            INSERT INTO reminder_table 
+            (reminder_id, reminder_channel, reminder_user, reminder_nexttime, reminder_interval, reminder_content, reminder_intervalvar)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (reminder_msg.id, reminder_msg.channel.id, ctx.author.id, timestamp, unixValue, msg, interval))
+        db.commit()
+
+    except Exception as e:
+        print("calendarset error:", e)
+        await ctx.send("❌ Error setting reminder.")
+
+# DELETE MESSAGE
+@bot.command()
+async def delmes(ctx):
+    try:
+        if not ctx.message.reference:
+            await ctx.send("❌ Reply to the reminder you want to delete.", delete_after=2)
+            return
+
+        ref_id = ctx.message.reference.message_id
+        cursor.execute("SELECT reminder_user FROM reminder_table WHERE reminder_id = %s", (ref_id,))
+        result = cursor.fetchone()
+
+        if result is None or result[0] != ctx.author.id:
+            await ctx.send("❌ You can only delete your own reminders.", delete_after=2)
+            return
+
+        msg = await ctx.channel.fetch_message(ref_id)
+        await msg.delete()
+        await ctx.message.delete()
+
+        cursor.execute("DELETE FROM reminder_table WHERE reminder_id = %s", (ref_id,))
+        db.commit()
+
+    except Exception as e:
+        print("delmes error:", e)
+        await ctx.send("❌ Error deleting reminder.", delete_after=2)
+
+# CURUNIX
+@bot.command()
+async def curunix(ctx):
+    await ctx.send(f"Current Unix timestamp: {int(datetime.now().timestamp())}")
+
+# FINDTIME
+@bot.command()
+async def findtime(ctx, *, content):
+    try:
+        dt = datetime.strptime(content.strip(), "%Y-%m-%d %H:%M")
+        ts = int(dt.timestamp())
+        await ctx.send(f"The Unix timestamp for `{content}` is: {ts} (<t:{ts}:F>)")
+    except ValueError:
+        await ctx.send("❌ Use format: YYYY-MM-DD HH:MM")
+
+# INTERVAL HELP
+@bot.command()
+async def interval(ctx):
+    msg = (
+        f"Use: `{operator}calendarset {{UNIX}} {{INTERVAL}} {{MESSAGE}}`\n"
+        f"Interval format: combinations of w, d, h, m, s (e.g., 1w2d3h)."
+    )
+    await ctx.send(msg)
+
+# YOUTUBE MUSIC PLAYER
+@bot.command()
+async def play(ctx, *, query):
+    if not ctx.author.voice:
+        await ctx.send("❌ You must be in a voice channel.")
+        return
+    query = query.strip().replace("<", "").replace(">", "")
+
+    isURL = validators.url(query) and ("youtube.com" in query or "youtu.be" in query)
+    searchQuery = query if isURL else f"ytsearch:{query}"
+
+    channel = ctx.author.voice.channel
+    if not ctx.voice_client:
+        await channel.connect()
+
+    ydl_opts = {'format': 'bestaudio', 'quiet': True, 'cookiefile': 'cookies.txt'}
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(searchQuery, download=False)
+            if 'entries' in info:  # Handle search result
+                info = info['entries'][0]
+            audio_url = info.get('url')
+
+        if not audio_url:
+            await ctx.send("❌ Could not retrieve audio stream.")
+            return
+
+        ctx.voice_client.stop()
+        ctx.voice_client.play(discord.FFmpegPCMAudio(audio_url))
+        await ctx.send(f"🎶 Now playing: {info.get('title', 'Unknown Title')}")
+
+    except DownloadError as e:
+        await ctx.send("❌ Could not download or play the video. It may be restricted.")
+        print(f"[yt_dlp] DownloadError: {e}")
+    except Exception as e:
+        await ctx.send("❌ An error occurred while processing the request.")
+        print(f"[play error] {e}")
+
+# STOP PLAYING MUSIC
+@bot.command()
+async def stop(ctx):
+    voice_client = ctx.voice_client
+    if not voice_client:
+        await ctx.send("❌ I'm not connected to any voice channel.", delete_after=5)
         return
 
-    if message.content.lower().startswith(f'{operator}calendarset'):
-        try:
-            content = message.content[len(f'{operator}calendarset'):].strip()
-            #print(f'Input: {content}')
+    if ctx.author.voice is None or ctx.author.voice.channel != voice_client.channel:
+        await ctx.send("❌ You must be in the same voice channel to stop me.", delete_after=5)
+        return
 
-            contentSplit = content.split(None, 2)
-            if len(contentSplit) < 3:
-                raise ValueError("Missing components, obtained parts: " + str(contentSplit))
-            
-            unixValue = parseDuration(contentSplit[1])
-            print(unixValue)
-            curTime = int(datetime.now().timestamp())
-            if int(contentSplit[0]) < int(curTime-unixValue+1):
-                await message.channel.send("❌ The given time is too far in the past. Please provide a future timestamp or up to one interval in the past.", delete_after=5)
-                #await message.channel.send(f"debug: Current time: <t:{curTime}:D> <t:{curTime}:T> MaxTime: <t:{int(contentSplit[0]) + int(unixValue)}:D> <t:{int(contentSplit[0]) + int(unixValue)}:T> \nGiven time: <t:{contentSplit[0]}:D> <t:{contentSplit[0]}:T> Interval: {contentSplit[1]} curTime: <t:{int(datetime.now().timestamp())}:D> <t:{int(datetime.now().timestamp())}:T>")
-                return
-            if unixValue < reminderCheckInterval:
-                await message.channel.send("❌ The interval must be at least {reminderCheckInterval} seconds.")
-                return
+    await voice_client.disconnect()
+    await ctx.send("🛑 Stopped and left the voice channel.")
 
-            reminderSend = await message.channel.send(
-                f"{contentSplit[2]}: <t:{contentSplit[0]}:F> `(every {contentSplit[1]})`"
-            )
+@bot.command()
+async def gift(ctx):
+    args = ctx.message.content.split()
+    if len(args) < 3:
+        await ctx.send("Usage: (gift <gi|hsr|zzz> <CODE1> [<CODE2> ...]")
+        return
 
-            try: 
-                await message.delete()
-            except discord.Forbidden as df:
-                print(f"No delete message permissions: {df}")
-            except Exception as e: 
-                print(f"delMessage missing: {message.id}: {e}")
+    game = args[1].lower()
+    codes = args[2:]
 
+    if game not in ("gi", "hsr", "zzz"):
+        await ctx.send("Valid games are: gi, hsr, zzz.")
+        return
 
+    links = []
+    links.append(f"Gift links for {game.upper()}:")
+    for code in codes:
+        code = code.strip().upper()
+        if game == "gi":
+            url = f"<https://genshin.hoyoverse.com/en/gift?code={code}>"
+            links.append(f"{code}: {url}")
+        elif game == "hsr":
+            url = f"<https://hsr.hoyoverse.com/gift?code={code}>"
+            links.append(f"{code}: {url}")
+        elif game == "zzz":
+            url = f"<https://zenless.hoyoverse.com/redemption?code={code}>"
+            links.append(f"{code}: {url}")
 
-            if dm == True: #DM user confirmation
-                try:
-                    await message.author.send(f"Reminder set for <t:{contentSplit[0]}:F> repeating every {contentSplit[1]} with message: {contentSplit[2]}")
-                except Exception as e:
-                    print(f"Could not send DM to user {message.author.id}: {e}")
-                    await message.channel.send(f"❌ Could not send you a DM. Please check your privacy settings.", delete_after=2)
+    await ctx.send("\n".join(links))
 
+@app_commands.user_install()
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True)
+@bot.tree.command(name="gift", description="Generate Hoyoverse gift links for GI or HSR")
+@app_commands.describe(
+    game="Game to generate links for (gi, hsr, zzz)",
+    codes="Space-separated list of gift codes"
+)
+async def gift_slash(interaction: discord.Interaction, game: str, codes: str):
+    game = game.lower()
+    if game not in ("gi", "hsr", "zzz"):
+        await interaction.response.send_message("Game must be 'gi', 'hsr', or 'zzz'.", ephemeral=True)
+        return
 
-            newReminder = (reminderSend.id, reminderSend.channel.id, message.author.id, int(contentSplit[0]), int(unixValue), contentSplit[2], contentSplit[1])
-            
-            try:
-                query = """ INSERT INTO reminder_table 
-                (reminder_id, reminder_channel, reminder_user, reminder_nexttime, reminder_interval, reminder_content, reminder_intervalvar) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s) """
-                cursor.execute(query, newReminder)
-                db.commit()
-            except mysql.connector.Error as err:
-                print(f"Error inserting reminder into database: {err}")
-                await message.channel.send("❌ An error occurred while saving the reminder. Please try again later.")
-                return
-            except Exception as e: 
-                print(f"Unexpected error inserting reminder: {e}")
+    code_list = codes.upper().split()
+    links = [f"Gift links for {game.upper()}:"]
+    for code in code_list:
+        if game == "gi":
+            url = f"<https://genshin.hoyoverse.com/en/gift?code={code}>"
+        elif game == "hsr":
+            url = f"<https://hsr.hoyoverse.com/gift?code={code}>"
+        elif game == "zzz":
+            url = f"<https://zenless.hoyoverse.com/redemption?code={code}>"
 
+        links.append(f"{code}: {url}")
 
+    await interaction.response.send_message("\n".join(links))
 
-        except ValueError as ve:
-            print("Error parsing reminder:", ve)
-            await message.channel.send(f"❌ Invalid format. Format:\n`{operator}calendarset {{UNIXTIMESTAMP}} {{INTERVAL}} {{MESSAGE}}`")
-        except Exception as e:
-            print("Error parsing reminder:", e)
-            await message.channel.send(f"❌An error occurred. Shout at Stocked cause he fucked up")
+#CUTEBABY
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
 
-    if message.content.lower().startswith(f'{operator}delmes'):
-        try:
-            if message.author == client.user:
-                return
+    if message.content.strip() == "CUTEBABY":
+        await message.channel.send("https://cdn.discordapp.com/attachments/1337529806606176307/1349904126800166993/flutterpat.gif?ex=68403def&is=683eec6f&hm=2552d294ac24c6ec4ce8fb6f4793e79f8da0be42af396b2f330b5e773d1df78b&")
+        await message.channel.send("https://tenor.com/view/flutterpage-flutterpage-reverse-1999-flutterpage-bonk-gif-7260436718441088941")
+        await message.channel.send("https://tenor.com/view/flutterpage-reverse-1999-re1999-good-morning-gif-1593186061945744120")
+        await message.channel.send("https://cdn.discordapp.com/attachments/312670434921283584/1379595561413509150/iu.png?ex=6840cffd&is=683f7e7d&hm=f2a6ad2f859cfce8398ab7fcc3d7dedbf7f7efdb5749fb55d441af72407403c3&")
+        return
+    
+    if message.content.strip() == "cementeater":
+        await message.channel.send("https://tenor.com/view/reverse1999-anime-r1999-37-game-gif-3582570055491321386")
+        await message.channel.send("https://tenor.com/view/reverse1999-anime-r1999-37-game-gif-3582570055491321386")
+        await message.channel.send("https://tenor.com/view/reverse1999-anime-r1999-37-game-gif-3582570055491321386")
+        await message.channel.send("https://tenor.com/view/reverse1999-anime-r1999-37-game-gif-3582570055491321386")
+        return
 
-            if message.reference is None or message.reference.message_id is None:
-                await message.channel.send("❌ Please reply to the reminder message you want to delete.", delete_after=2)
-                return
+    if message.content == "deez nuts":
+        await message.channel.send("ha gotteem")
+        return
 
-            try:
-                query = """
-                        SELECT reminder_user FROM reminder_table 
-                            WHERE reminder_id = %s
-                            """
-                cursor.execute(query, (message.reference.message_id,))
-                responser = cursor.fetchone()
-                if responser is None:
-                    try:
-                        referencedMSG = await message.channel.fetch_message(message.reference.message_id)
-                        await referencedMSG.delete()
-                        await message.delete()
-                    except discord.NotFound:
-                        await message.channel.send("❌ The referenced message was not found.", delete_after=2)
-                        return
-                    return
-                
-                elif responser[0] == message.author.id:
-                    try:
-                        referencedMSG = await message.channel.fetch_message(message.reference.message_id)
-                        await referencedMSG.delete()
-                        await message.delete()
-                    except discord.NotFound:
-                        await message.channel.send("❌ The referenced message was not found.", delete_after=2)
-                        return
-                    return
-                
-                else:
-                    await message.channel.send("❌ You can only delete your own reminders.", delete_after=2)
-                    return
-            except Exception as e:
-                print(f"Error checking message reference: {e}")
-                await message.channel.send("❌ An error occurred while trying to delete the message.", delete_after=2)
-                return
+    await bot.process_commands(message) 
 
 
 
-        except Exception as e:
-            print("Error parsing delmes command:", e)
-            await message.channel.send("❌ An error occurred. Please try again.", delete_after=2)
-
-    if message.content.lower().startswith(f'{operator}curunix'):
-        try:
-            current_unix = int(datetime.now().timestamp())
-            await message.channel.send(f"Current Unix timestamp: {current_unix}")
-        except Exception as e:
-            print("Error getting current Unix timestamp:", e)
-
-    if message.content.lower().startswith(f'{operator}help'):
-        help_message = "Available commands:\n"
-        for command, description in commandList.items():
-            help_message += f"{command}: {description.format(operator=operator)}\n"
-        await message.channel.send(help_message)
-
-    if message.content.lower().startswith(f'{operator}interval'):
-        interval_info = (
-            f"Reminder intervals can be set using the following format:\n"
-            f"`{operator}calendarset {{UNIXTIMESTAMP}} {{INTERVAL}} {{MESSAGE}}`\n"
-            f"Where `INTERVAL` can be a combination of:\n"
-            f"- `w`: weeks\n"
-            f"- `d`: days\n"
-            f"- `h`: hours\n"
-            f"- `m`: minutes\n"
-            f"- `s`: seconds\n"
-            f"Examples:\n"
-            f"`1w` for 1 week, `2d5h3m` for 2 days, 5 hours, and 3 minutes."
-        )
-        await message.channel.send(interval_info)
-
-
-
-# Background task to check for reminders every 60 seconds
+# REMINDER CHECK LOOP
+@tasks.loop(seconds=reminderCheckInterval)
 async def check_reminders():
-    await client.wait_until_ready()
-    while not client.is_closed():
-        now = int(datetime.now().timestamp())
+    now = int(datetime.now().timestamp())
+    cursor.execute("""
+        SELECT reminder_id, reminder_channel, reminder_user, reminder_nexttime,
+        reminder_interval, reminder_content, reminder_intervalvar
+        FROM reminder_table
+        WHERE reminder_nexttime <= %s
+    """, (now,))
+    due = cursor.fetchall()
 
+    if due:
+        print(f"Checking reminders at {now}. Due reminders: {len(due)}")
+
+    for messageID, channelID, authorID, reminderTime, intervalTime, messageContent, intervalVar in due:
         try:
-            query = """
-            SELECT  reminder_id, reminder_channel, reminder_user, reminder_nexttime,
-                    reminder_interval, reminder_content, reminder_intervalvar
-            FROM reminder_table
-            WHERE reminder_nexttime <= %s
-            """
-            cursor.execute(query, (now,))
-            due = cursor.fetchall()
+            channel = bot.get_channel(channelID)
+            messageToEdit = await channel.fetch_message(messageID)
+            newTime = reminderTime + intervalTime
 
-            if due:
-                print(f"Checking reminders at {now}. Due reminders: {len(due)}")
+            await messageToEdit.edit(content=f"{messageContent}: <t:{newTime}:F> `(every {intervalVar})`")
 
-            for messageID, channelID, authorID, reminderTime, intervalTime, messageContent, intervalVar in due:
-                try:
-                    channel = client.get_channel(channelID)
-                    messageToEdit = await channel.fetch_message(messageID)
-                    newTime = reminderTime + intervalTime
+            cursor.execute(
+                "UPDATE reminder_table SET reminder_nexttime = %s WHERE reminder_id = %s",
+                (newTime, messageID)
+            )
+            db.commit()
 
-                    await messageToEdit.edit(content=f"{messageContent}: <t:{newTime}:F> `(every {intervalVar})`")
-
-                    # Update reminder in DB
-                    update_query = """
-                    UPDATE reminder_table
-                    SET reminder_nexttime = %s
-                    WHERE reminder_id = %s
-                    """
-                    cursor.execute(update_query, (newTime, messageID))
-                    db.commit()
-
-                except discord.NotFound:
-                    delete_query = "DELETE FROM reminder_table WHERE reminder_id = %s"
-                    cursor.execute(delete_query, (messageID,))
-                    db.commit()
-                    print("Deleted reminder message with ID:", messageID)
-                except Exception as e:
-                    print(f"Could not process reminder for user {authorID}: {e}")
-
+        except discord.NotFound:
+            cursor.execute("DELETE FROM reminder_table WHERE reminder_id = %s", (messageID,))
+            db.commit()
+            print("Deleted missing reminder", messageID)
         except Exception as e:
-            print(f"Error querying reminders: {e}")
-
-        await asyncio.sleep(reminderCheckInterval)
+            print(f"Reminder update error for {messageID}: {e}")
 
 
-
+# PARSE DURATION
 def parseDuration(preDuration):
     pattern = r"(\d+)([wdhms])"
     matches = re.findall(pattern, preDuration)
 
-    totalSeconds = 0
-    unitMults = {
-        'w': 604800, # 7*24*60*60
-        'd': 86400,  # 24*60*60
-        'h': 3600,   # 60*60
-        'm': 60,
-        's': 1
-    }
+    unitMults = {'w': 604800, 'd': 86400, 'h': 3600, 'm': 60, 's': 1}
+    return sum(int(val) * unitMults[unit] for val, unit in matches)
 
-    for value, unit in matches:
-        totalSeconds += int(value) * unitMults[unit]
+# BOT READY EVENT
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user}')
+    check_reminders.start()
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash commands.")
+    except Exception as e:
+        print("Failed to sync commands:", e)
 
-    return int(totalSeconds)
 
 # RUN
-
-@client.event
-async def on_ready():
-    print(f'We have logged in as {client.user}')
-    client.loop.create_task(check_reminders())  # Start the background reminder check
-
-client.run(os.getenv("CALENDARBOT_KEY"))
+bot.run(os.getenv("CALENDARBOT_KEY"))
