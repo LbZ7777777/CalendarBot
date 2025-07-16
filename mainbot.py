@@ -2,6 +2,9 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
+from discord import FFmpegPCMAudio, PCMVolumeTransformer
+from discord.ext import commands
+from collections import deque
 import os
 from dotenv import load_dotenv
 import asyncio
@@ -21,9 +24,15 @@ load_dotenv()
 operator = "("
 dm = False
 reminderCheckInterval = 20
+song_queues = {}
 
 # BOT SETUP
 bot = commands.Bot(command_prefix=operator, intents=intents, help_command=None)
+
+def get_queue(guild_id):
+    if guild_id not in song_queues:
+        song_queues[guild_id] = deque()
+    return song_queues[guild_id]
 
 # DATABASE SETUP
 db = mysql.connector.connect(
@@ -36,7 +45,7 @@ cursor = db.cursor()
 
 # COMMAND LIST
 commandList = {
-    "calendarset": "Make a repeating reminder: '{operator}calendarset {UNIXTIMESTAMP} {INTERVAL} {MESSAGE}'",
+    "calendarset": "Make a repeating reminder: '{operator}calendarset {{UNIXTIMESTAMP}} {{INTERVAL}} {{MESSAGE}}'",
     "delmes": "Delete a reminder by replying to it.",
     "curunix": "Print current Unix timestamp.",
     "interval": "View interval formatting help.",
@@ -44,6 +53,7 @@ commandList = {
     "help": "Show this help message.",
     "play": "Play a YouTube audio stream in a voice channel: '{operator}play <URL>'",
     "stop": "Stop playing music and leave the voice channel.",
+    "skip": "Skip the currently playing song.",
     "code": "Generate a gift link for a code (GI/HSR): '{operator}gift <gi|hsr> <CODE>'",
     "gift": "Generate Hoyoverse gift links for GI or HSR: '{operator}gift <gi|hsr> <CODE1> [<CODE2> ...])'"
 }
@@ -142,6 +152,7 @@ async def interval(ctx):
 # YOUTUBE MUSIC PLAYER
 @bot.command()
 async def play(ctx, *, query):
+
     if not ctx.author.voice:
         await ctx.send("❌ You must be in a voice channel.")
         return
@@ -154,7 +165,11 @@ async def play(ctx, *, query):
     if not ctx.voice_client:
         await channel.connect()
 
-    ydl_opts = {'format': 'bestaudio', 'quiet': True, 'cookiefile': 'cookies.txt'}
+
+    ydl_opts = {
+        'options': '-vn',
+        "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+        'format': 'bestaudio', 'quiet': True, 'cookiefile': 'cookies.txt'}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(searchQuery, download=False)
@@ -162,13 +177,24 @@ async def play(ctx, *, query):
                 info = info['entries'][0]
             audio_url = info.get('url')
 
+        audio_url = info.get('url')
+        title = info.get('title', 'Unknown Title')
+
         if not audio_url:
             await ctx.send("❌ Could not retrieve audio stream.")
             return
+        
+        queue  = get_queue(ctx.guild.id)
+        entry = {'url': audio_url, 'title': title}
 
-        ctx.voice_client.stop()
-        ctx.voice_client.play(discord.FFmpegPCMAudio(audio_url))
-        await ctx.send(f"🎶 Now playing: {info.get('title', 'Unknown Title')}")
+        if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+            queue.append(entry)
+            await ctx.send(f"🎶 Added to queue: {title}")
+        else:
+            source = ffmpeg_audio = FFmpegPCMAudio(audio_url, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5")
+            audio_src = PCMVolumeTransformer(source, volume=0.2)
+            ctx.voice_client.play(audio_src, after=lambda e: play_next(ctx, ctx.voice_client))
+            await ctx.send(f"🎶 Now playing: {title}")
 
     except DownloadError as e:
         await ctx.send("❌ Could not download or play the video. It may be restricted.")
@@ -191,6 +217,42 @@ async def stop(ctx):
 
     await voice_client.disconnect()
     await ctx.send("🛑 Stopped and left the voice channel.")
+
+# SKIP SONG
+@bot.command()
+async def skip(ctx):
+    voice_client = ctx.voice_client
+    if not voice_client or not voice_client.is_connected():
+        await ctx.send("❌ I'm not connected to any voice channel.", delete_after=5)
+        return
+
+    if ctx.author.voice is None or ctx.author.voice.channel != voice_client.channel:
+        await ctx.send("❌ You must be in the same voice channel to skip the song.", delete_after=5)
+        return
+
+    if not voice_client.is_playing() and not voice_client.is_paused():
+        await ctx.send("❌ No song is currently playing.", delete_after=5)
+        return
+    
+    await ctx.send("⏭️ Skipping the current song.")
+
+    voice_client.stop()
+    play_next(ctx, voice_client)
+
+#QUEUE MANAGEMENT
+def play_next(ctx, voice_client):
+    queue = get_queue(ctx.guild.id)
+
+    if queue:
+        next_entry = queue.popleft()
+        source = FFmpegPCMAudio(next_entry['url'], before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5")
+        audio = PCMVolumeTransformer(source, volume=0.2)
+        voice_client.play(audio, after=lambda e: play_next(ctx, voice_client))
+        coro = ctx.send(f"🎶 Now playing: {next_entry['title']}")
+        bot.loop.create_task(coro)
+    else:
+        coro = voice_client.disconnect()
+        bot.loop.create_task(coro)
 
 @bot.command()
 async def gift(ctx):
@@ -268,6 +330,14 @@ async def on_message(message):
         await message.channel.send("https://tenor.com/view/reverse1999-anime-r1999-37-game-gif-3582570055491321386")
         await message.channel.send("https://tenor.com/view/reverse1999-anime-r1999-37-game-gif-3582570055491321386")
         await message.channel.send("https://tenor.com/view/reverse1999-anime-r1999-37-game-gif-3582570055491321386")
+        return
+    
+    if message.content.strip() == "IIYEII":
+        await message.channel.send("https://cdn.discordapp.com/attachments/312670434921283584/1393567490247884890/sharkass.gif?ex=6873a45c&is=687252dc&hm=e14ad68f7d95b8e4cf03b0102125fa224d9d06ac48f778f5fb4442615242cade&")
+        return
+    
+    if message.content.strip() == "beengobongo":
+        await message.channel.send("https://tenor.com/view/ump9-ump-girls-frontline-gfl-gif-20084820")
         return
 
     if message.content == "deez nuts":
