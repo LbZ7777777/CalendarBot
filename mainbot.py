@@ -9,11 +9,13 @@ import os
 from dotenv import load_dotenv
 import asyncio
 import re
-from datetime import datetime
+import datetime
+import calendar
 import mysql.connector
 import yt_dlp
 from yt_dlp.utils import DownloadError
 import validators
+import traceback
 
 # LOAD ENV AND INTENTS
 intents = discord.Intents.default()
@@ -87,8 +89,8 @@ async def help(ctx):
 @bot.command()
 async def calendarset(ctx, timestamp: int, interval: str, *, msg: str):
     try:
-        unixValue = parseDuration(interval)
-        curTime = int(datetime.now().timestamp())
+        unixValue = parseDuration(interval, "unix")
+        curTime = int(datetime.datetime.now().timestamp())
 
         if timestamp < curTime - unixValue + 1:
             await ctx.send("❌ Timestamp is too far in the past.", delete_after=5)
@@ -145,13 +147,13 @@ async def delmes(ctx):
 # CURUNIX
 @bot.command()
 async def curunix(ctx):
-    await ctx.send(f"Current Unix timestamp: {int(datetime.now().timestamp())}")
+    await ctx.send(f"Current Unix timestamp: {int(datetime.datetime.now().timestamp())}")
 
 # FINDTIME
 @bot.command()
 async def findtime(ctx, *, content):
     try:
-        ts = int(dt.timestamp())
+        ts = int(datetime.datetime.strptime(content, "%Y-%m-%d %H:%M").timestamp())
         await ctx.send(f"The Unix timestamp for `{content}` is: {ts} (<t:{ts}:F>)")
     except ValueError:
         await ctx.send("❌ Use format: YYYY-MM-DD HH:MM")
@@ -191,7 +193,6 @@ async def calendarbatch(ctx, game: str):
                 db.commit()
                 #await ctx.send(f"⚠️ Batch message not found. Deleted from database, proceeding to create new batch.")
 
-        
         cursor.execute(""" 
         SELECT batch_nexttime, batch_interval, batch_content, batch_intervalvar, batch_type
         FROM batch_table
@@ -205,7 +206,11 @@ async def calendarbatch(ctx, game: str):
         content = f"{gameList.get(game, game)} batch reminder: \n"
 
         for batch in batch_data:
-            content += f"{batch[2]}: <t:{batch[0]}:F> <t:{batch[0]}:R> `(every {batch[3]})`\n"
+            if batch[6] == 0:  # If batch_type is 0, it's a normal reminder
+                content += f"{batch[4]}: <t:{batch[2]}:F> <t:{batch[2]}:R> `(every {batch[5]})`\n"
+            if batch[6] == 1:  # If batch_type is 1, it's a date reminder
+                curSuffix = daySuffix(batch[5])
+                content += f"{batch[4]}: <t:{batch[2]}:F> <t:{batch[2]}:R> `(every {batch[5]}{curSuffix})`\n"
         batch_msg = await ctx.send(content)
 
         print(batch_msg.id)
@@ -222,10 +227,6 @@ async def calendarbatch(ctx, game: str):
         print(f"calendarbatch error: {e}")
         await ctx.send("❌ Error checking existing batch.", delete_after=5)
         return
-        
-
-
-            
 
 ##
 ### YOUTUBE MUSIC PLAYER SETUP ###################################################################################################################
@@ -400,7 +401,7 @@ async def gift_slash(interaction: discord.Interaction, game: str, codes: str):
 
     await interaction.response.send_message("\n".join(links))
 
-#CUTEBABY
+# TEXT RESPONSES
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -463,7 +464,7 @@ async def editBatchMessage(batch_game, new_content):
 # REMINDER CHECK LOOP
 @tasks.loop(seconds=reminderCheckInterval)
 async def check_reminders():
-    now = int(datetime.now().timestamp())
+    now = int(datetime.datetime.now().timestamp())
     cursor.execute("""
         SELECT reminder_id, reminder_channel, reminder_user, reminder_nexttime,
         reminder_interval, reminder_content, reminder_intervalvar
@@ -499,14 +500,19 @@ async def check_reminders():
 # BATCH CHECK LOOP
 @tasks.loop(seconds=reminderCheckInterval)
 async def check_batch():
-    #print("Checking batch reminders...")
-    now = int(datetime.now().timestamp())
+    dueCheck = []
+    due = []
+    now = int(datetime.datetime.now().timestamp())
     cursor.execute("""
-        SELECT batch_game
+        SELECT batch_game, batch_nexttime
         FROM batch_table
-        WHERE batch_nexttime <= %s
-    """, (now,))
-    due = cursor.fetchall()
+    """)	
+    dueCheck = cursor.fetchall()
+    if not dueCheck:
+        return
+    for row in dueCheck:
+        if row[1] <= now:
+            due.append(row)
     due_set = set(row[0] for row in due)
     #print(f"Due batch reminders at {now}: {len(due_set)}")
 
@@ -523,16 +529,26 @@ async def check_batch():
                 # Process the batch data
                 print(f"Processing batch for {game} at {now}.")
                 for batch in batch_data:
-                    if batch[2] <= now:
-                        new_time = batch[2] + batch[3]
+                        if batch[2] <= now:
+                            if batch[6] == 0:  # If batch_type is 0, it's a normal reminder
+                                new_time = batch[2] + batch[3]
 
-                        # Update the next time for the batch
-                        cursor.execute(
-                            "UPDATE batch_table SET batch_nexttime = %s WHERE batch_id = %s",
-                            (new_time, batch[0])
-                        )
-                        db.commit()
-                
+                                # Update the next time for the batch
+                                cursor.execute(
+                                    "UPDATE batch_table SET batch_nexttime = %s WHERE batch_id = %s",
+                                    (new_time, batch[0])
+                                )
+                                db.commit()
+                            if batch[6] == 1:  # If batch_type is 1, it's a date reminder
+                                new_time = parseDateUpdate(batch[5], batch[2])
+
+                                # Update the next time for the batch
+                                cursor.execute(
+                                    "UPDATE batch_table SET batch_nexttime = %s WHERE batch_id = %s",
+                                    (new_time, batch[0])
+                                )
+                                db.commit()
+
                 cursor.execute("""
                 SELECT batch_id, batch_game, batch_nexttime, batch_interval, batch_content, batch_intervalvar, batch_type
                 FROM batch_table 
@@ -543,20 +559,75 @@ async def check_batch():
                 batch_data.sort(key=lambda x: x[2])
                 content = f"{gameList.get(game, game)} batch reminders: \n"
                 for batch in batch_data:
-                    content += f"{batch[4]}: <t:{batch[2]}:F> <t:{batch[2]}:R> `(every {batch[5]})`\n"
+                    if batch[6] == 0:  # If batch_type is 0, it's a normal reminder
+                        content += f"{batch[4]}: <t:{batch[2]}:F> <t:{batch[2]}:R> `(every {batch[5]})`\n"
+                    if batch[6] == 1:  # If batch_type is 1, it's a date reminder
+                        curSuffix = daySuffix(batch[5])
+                        content += f"{batch[4]}: <t:{batch[2]}:F> <t:{batch[2]}:R> `(every {batch[5]}{curSuffix})`\n"
 
                 await editBatchMessage(game, content)
                 
         except Exception as e:
             print(f"Batch processing error for {game}: {e}")
+            traceback.print_exc()
 
 # PARSE DURATION
-def parseDuration(preDuration):
-    pattern = r"(\d+)([wdhms])"
-    matches = re.findall(pattern, preDuration)
+def parseDuration(preDuration, type):
+    if type == "unix":
+        pattern = r"(\d+)([wdhms])"
+        matches = re.findall(pattern, preDuration)
 
-    unitMults = {'w': 604800, 'd': 86400, 'h': 3600, 'm': 60, 's': 1}
-    return sum(int(val) * unitMults[unit] for val, unit in matches)
+        unitMults = {'w': 604800, 'd': 86400, 'h': 3600, 'm': 60, 's': 1}
+        return sum(int(val) * unitMults[unit] for val, unit in matches)
+    
+def parseDateUpdate(dateInfo, currentTime):
+    dateInfo = int(dateInfo)
+    currentDT = datetime.datetime.fromtimestamp(currentTime)
+
+    year = currentDT.year
+    month = currentDT.month
+    day = currentDT.day
+
+    if day < dateInfo:
+        try:
+            targetDate = datetime.datetime(year, month, dateInfo, currentDT.hour, currentDT.minute, currentDT.second)
+        except ValueError:
+            # fallback: if invalid day, go to last day of this month
+            if month == 12:
+                nextMonthFirst = datetime.datetime(year + 1, 1, 1, currentDT.hour, currentDT.minute, currentDT.second)
+            else:
+                nextMonthFirst = datetime.datetime(year, month + 1, 1, currentDT.hour, currentDT.minute, currentDT.second)
+            lastDay = nextMonthFirst - datetime.timedelta(days=1)
+            targetDate = datetime.datetime(year, month, lastDay.day, currentDT.hour, currentDT.minute, currentDT.second)
+    else:
+        # move to next month
+        if month == 12:
+            year += 1
+            month = 1
+        else:
+            month += 1
+        try:
+            targetDate = datetime.datetime(year, month, dateInfo, currentDT.hour, currentDT.minute, currentDT.second)
+        except ValueError:
+            # fallback: last day of next month
+            if month == 12:
+                nextMonthFirst = datetime.datetime(year + 1, 1, 1, currentDT.hour, currentDT.minute, currentDT.second)
+            else:
+                nextMonthFirst = datetime.datetime(year, month + 1, 1, currentDT.hour, currentDT.minute, currentDT.second)
+            lastDay = nextMonthFirst - datetime.timedelta(days=1)
+            targetDate = datetime.datetime(year, month, lastDay.day, currentDT.hour, currentDT.minute, currentDT.second)
+
+    deltaSeconds = (targetDate - currentDT).total_seconds()
+    return int(currentTime + deltaSeconds)
+
+
+
+def daySuffix(day):
+    day = int(day)
+    if 10 <= day % 100 <= 13:
+        return 'th'
+    else:
+        return {1: 'st', 2: 'nd', 3: 'rd'}.get(day % 10, 'th')
 
 # BOT READY EVENT ###################################################################################################################
 @bot.event
