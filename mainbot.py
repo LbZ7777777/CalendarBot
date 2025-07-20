@@ -26,7 +26,7 @@ dm = False
 reminderCheckInterval = 20
 song_queues = {}
 
-# BOT SETUP
+# BOT SETUP ###################################################################################################################
 bot = commands.Bot(command_prefix=operator, intents=intents, help_command=None)
 
 def get_queue(guild_id):
@@ -42,6 +42,10 @@ db = mysql.connector.connect(
     database=os.getenv("SQLDB")
 )
 cursor = db.cursor()
+
+##
+### ASSIST COMMANDS ###################################################################################################################
+##
 
 # COMMAND LIST
 commandList = {
@@ -66,6 +70,10 @@ async def help(ctx):
         help_message += f"{command}: {desc.format(operator=operator)}\n"
     await ctx.send(help_message)
 
+##
+### CALENDAR COMMANDS ###################################################################################################################
+##
+
 # CALENDAR SET
 @bot.command()
 async def calendarset(ctx, timestamp: int, interval: str, *, msg: str):
@@ -80,7 +88,7 @@ async def calendarset(ctx, timestamp: int, interval: str, *, msg: str):
             await ctx.send(f"❌ Interval must be at least {reminderCheckInterval} seconds.")
             return
 
-        reminder_msg = await ctx.send(f"{msg}: <t:{timestamp}:F> `(every {interval})`")
+        reminder_msg = await ctx.send(f"{msg}: <t:{timestamp}:F> <t:{timestamp}:R> `(every {interval})`")
         if dm:
             try:
                 await ctx.author.send(f"Reminder set for <t:{timestamp}:F> repeating every {interval}: {msg}")
@@ -134,7 +142,6 @@ async def curunix(ctx):
 @bot.command()
 async def findtime(ctx, *, content):
     try:
-        dt = datetime.strptime(content.strip(), "%Y-%m-%d %H:%M")
         ts = int(dt.timestamp())
         await ctx.send(f"The Unix timestamp for `{content}` is: {ts} (<t:{ts}:F>)")
     except ValueError:
@@ -148,6 +155,13 @@ async def interval(ctx):
         f"Interval format: combinations of w, d, h, m, s (e.g., 1w2d3h)."
     )
     await ctx.send(msg)
+
+# CALENDAR BATCH 
+
+
+##
+### YOUTUBE MUSIC PLAYER SETUP ###################################################################################################################
+##
 
 # YOUTUBE MUSIC PLAYER
 @bot.command()
@@ -239,7 +253,7 @@ async def skip(ctx):
     voice_client.stop()
     play_next(ctx, voice_client)
 
-#QUEUE MANAGEMENT
+# QUEUE MANAGEMENT
 def play_next(ctx, voice_client):
     queue = get_queue(ctx.guild.id)
 
@@ -254,6 +268,8 @@ def play_next(ctx, voice_client):
         coro = voice_client.disconnect()
         bot.loop.create_task(coro)
 
+
+# GIFT LINK
 @bot.command()
 async def gift(ctx):
     args = ctx.message.content.split()
@@ -283,6 +299,10 @@ async def gift(ctx):
             links.append(f"{code}: {url}")
 
     await ctx.send("\n".join(links))
+
+## 
+### SLASH COMMANDS ###################################################################################################################
+##
 
 @app_commands.user_install()
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -346,9 +366,11 @@ async def on_message(message):
 
     await bot.process_commands(message) 
 
+##
+### PARSING ###################################################################################################################
+##
 
-
-# REMINDER CHECK LOOP
+# REMINDER CHECK LOOP 
 @tasks.loop(seconds=reminderCheckInterval)
 async def check_reminders():
     now = int(datetime.now().timestamp())
@@ -369,7 +391,7 @@ async def check_reminders():
             messageToEdit = await channel.fetch_message(messageID)
             newTime = reminderTime + intervalTime
 
-            await messageToEdit.edit(content=f"{messageContent}: <t:{newTime}:F> `(every {intervalVar})`")
+            await messageToEdit.edit(content=f"{messageContent}: <t:{newTime}:F> <t:{newTime}:R> `(every {intervalVar})`")
 
             cursor.execute(
                 "UPDATE reminder_table SET reminder_nexttime = %s WHERE reminder_id = %s",
@@ -393,7 +415,7 @@ def parseDuration(preDuration):
     unitMults = {'w': 604800, 'd': 86400, 'h': 3600, 'm': 60, 's': 1}
     return sum(int(val) * unitMults[unit] for val, unit in matches)
 
-# BOT READY EVENT
+# BOT READY EVENT ###################################################################################################################
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
@@ -404,6 +426,5 @@ async def on_ready():
     except Exception as e:
         print("Failed to sync commands:", e)
 
-
-# RUN
+# RUN  
 bot.run(os.getenv("CALENDARBOT_KEY"))
