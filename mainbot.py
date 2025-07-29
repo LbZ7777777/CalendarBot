@@ -1,7 +1,6 @@
 # IMPORT
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands
 from discord import FFmpegPCMAudio, PCMVolumeTransformer
 from discord.ext import commands
 from collections import deque
@@ -16,6 +15,10 @@ import yt_dlp
 from yt_dlp.utils import DownloadError
 import validators
 import traceback
+import sys
+import logging
+#logging.basicConfig(level=logging.DEBUG)
+
 
 # LOAD ENV AND INTENTS
 intents = discord.Intents.default()
@@ -235,24 +238,36 @@ async def calendarbatch(ctx, game: str):
 # YOUTUBE MUSIC PLAYER
 @bot.command()
 async def play(ctx, *, query):
-
     if not ctx.author.voice:
         await ctx.send("❌ You must be in a voice channel.")
         return
-    query = query.strip().replace("<", "").replace(">", "")
-
-    isURL = validators.url(query) and ("youtube.com" in query or "youtu.be" in query)
-    searchQuery = query if isURL else f"ytsearch:{query}"
 
     channel = ctx.author.voice.channel
-    if not ctx.voice_client:
-        await channel.connect()
+    voice_client = ctx.voice_client
+
+    try:
+        if voice_client is None:
+            voice_client = await channel.connect()
+        elif voice_client.channel != channel:
+            await voice_client.move_to(channel)
+    except asyncio.TimeoutError:
+        await ctx.send("❌ Connection timed out. Please try again.")
+        return
+    except Exception as e:
+        await ctx.send(f"❌ An error occurred: {e}")
+        print(f"[play error] {e}")
+        return
+
+    # ...rest of your play command to get audio_url and play it...
 
 
     ydl_opts = {
-        'options': '-vn',
-        "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-        'format': 'bestaudio', 'quiet': True, 'cookiefile': 'cookies.txt'}
+    'format': 'bestaudio',
+    'quiet': True,
+    'cookiefile': 'cookies.txt',
+    'source_address': '0.0.0.0',  # force ipv4
+    }
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(searchQuery, download=False)
@@ -274,7 +289,9 @@ async def play(ctx, *, query):
             queue.append(entry)
             await ctx.send(f"🎶 Added to queue: {title}")
         else:
-            source = ffmpeg_audio = FFmpegPCMAudio(audio_url, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5")
+            source = FFmpegPCMAudio(audio_url, 
+                    before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 
+                    options='-vn')
             audio_src = PCMVolumeTransformer(source, volume=0.2)
             ctx.voice_client.play(audio_src, after=lambda e: play_next(ctx, ctx.voice_client))
             await ctx.send(f"🎶 Now playing: {title}")
@@ -373,22 +390,16 @@ async def gift(ctx):
 ### SLASH COMMANDS ###################################################################################################################
 ##
 
-@app_commands.user_install()
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True)
-@bot.tree.command(name="gift", description="Generate Hoyoverse gift links for GI or HSR")
-@app_commands.describe(
-    game="Game to generate links for (gi, hsr, zzz)",
-    codes="Space-separated list of gift codes"
-)
-async def gift_slash(interaction: discord.Interaction, game: str, codes: str):
+@bot.slash_command(name="gift", description="Generate Hoyoverse gift links for GI or HSR")
+async def gift_slash(ctx: discord.ApplicationContext, game: str, codes: str):
     game = game.lower()
     if game not in ("gi", "hsr", "zzz"):
-        await interaction.response.send_message("Game must be 'gi', 'hsr', or 'zzz'.", ephemeral=True)
+        await ctx.respond("Game must be 'gi', 'hsr', or 'zzz'.", ephemeral=True)
         return
 
     code_list = codes.upper().split()
     links = [f"Gift links for {game.upper()}:"]
+
     for code in code_list:
         if game == "gi":
             url = f"<https://genshin.hoyoverse.com/en/gift?code={code}>"
@@ -399,7 +410,7 @@ async def gift_slash(interaction: discord.Interaction, game: str, codes: str):
 
         links.append(f"{code}: {url}")
 
-    await interaction.response.send_message("\n".join(links))
+    await ctx.respond("\n".join(links))
 
 # TEXT RESPONSES
 @bot.event
@@ -620,8 +631,6 @@ def parseDateUpdate(dateInfo, currentTime):
     deltaSeconds = (targetDate - currentDT).total_seconds()
     return int(currentTime + deltaSeconds)
 
-
-
 def daySuffix(day):
     day = int(day)
     if 10 <= day % 100 <= 13:
@@ -635,11 +644,15 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
     check_reminders.start()
     check_batch.start()
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} slash commands.")
-    except Exception as e:
-        print("Failed to sync commands:", e)
 
 # RUN  
-bot.run(os.getenv("CALENDARBOT_KEY"))
+if __name__ == "__main__":
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    try:
+        bot.run(os.getenv("CALENDARBOT_KEY"))
+    except KeyboardInterrupt:
+        print("Bot shut down manually.")
+        sys.exit(0)
+
