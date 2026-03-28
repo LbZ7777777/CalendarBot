@@ -1,19 +1,19 @@
 # IMPORT
-import discord
+import discord #discord.py
 from discord.ext import commands, tasks
 from discord import FFmpegPCMAudio, PCMVolumeTransformer
 from discord.ext import commands
 from collections import deque
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv #python-dotenv
 import asyncio
 import re
 import datetime
 import calendar
-import mysql.connector
-import yt_dlp
+import mysql.connector #mysql-connector-python
+import yt_dlp #yt-dlp
 from yt_dlp.utils import DownloadError
-import validators
+import validators #validators
 import traceback
 import sys
 import logging
