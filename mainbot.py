@@ -19,6 +19,8 @@ import sys
 import logging
 #logging.basicConfig(level=logging.DEBUG)
 
+import random #for peace's post function
+
 
 # LOAD ENV AND INTENTS
 intents = discord.Intents.default()
@@ -65,7 +67,8 @@ commandList = {
     "stop": "Stop playing music and leave the voice channel.",
     "skip": "Skip the currently playing song.",
     "code": "Generate a gift link for a code (GI/HSR): '{operator}gift <gi|hsr> <CODE>'",
-    "gift": "Generate Hoyoverse gift links for GI or HSR: '{operator}gift <gi|hsr> <CODE1> [<CODE2> ...])'"
+    "gift": "Generate Hoyoverse gift links for GI or HSR: '{operator}gift <gi|hsr> <CODE1> [<CODE2> ...])'",
+    "post": "Posts a databased image of a character: '{operator}post <char name> <number images>'"
 }
 
 gameList = {
@@ -638,12 +641,55 @@ def daySuffix(day):
     else:
         return {1: 'st', 2: 'nd', 3: 'rd'}.get(day % 10, 'th')
 
+##
+### Peace Coding an image poster ####################################################################################################
+##
+
+peace_character_list = {} #empty dictionary
+peace_os_path = ""
+
+def post_init(): #assembles character list that can be posted
+    random.seed()
+
+    peace_os_path = os.join(os.getcwd(), "post")
+
+    for item in os.listdir(peace_os_path): #assumes url lists are in files "nilou.char"
+        if len(item) <= 6: #input error checking
+            continue
+        if item[-5:] = ".char":
+            peace_os_path[item[:-5].lower] = item
+
+@bot.command
+async def post(ctx, char_name = "nilou", count = 1): #the actual command
+    #check if character has an attached list of urls
+    if not (char_name.lower() in peace_character_list):
+        await ctx.send(f"Sorry no url list is available for {char_name}.")
+        return
+    
+    #check url file
+    my_file = open(os.join(peace_os_path, peace_character_list[char_name.lower()]))
+
+    my_data = []
+    for line in my_file:
+        my_data.append(line)
+
+    if len(my_data) = 0: #error checking
+        await ctx.send(f"Sorry, the url list for {char_name} is empty.")
+        return
+
+    for i in range(max(count, 1)): #prints at least 1 url
+        url_num = random.randint(0, len(my_data) - 1)
+        await ctx.send(f"{my_data[url_num]}")
+
+
 # BOT READY EVENT ###################################################################################################################
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
     check_reminders.start()
     check_batch.start()
+
+    post_init() #for peace's post command
 
 # RUN  
 if __name__ == "__main__":
