@@ -656,7 +656,7 @@ def post_init(): #assembles character list that can be posted
     for item in os.listdir(peace_os_path): #assumes url lists are in files "nilou.char"
         if len(item) <= 6: #input error checking
             continue
-        if item[-5:] = ".char":
+        if item[-5:] == ".char":
             peace_os_path[item[:-5].lower] = item
 
 @bot.command
@@ -673,7 +673,7 @@ async def post(ctx, char_name = "nilou", count = 1): #the actual command
     for line in my_file:
         my_data.append(line)
 
-    if len(my_data) = 0: #error checking
+    if len(my_data) == 0: #error checking
         await ctx.send(f"Sorry, the url list for {char_name} is empty.")
         return
 
