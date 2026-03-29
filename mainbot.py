@@ -392,7 +392,7 @@ async def gift(ctx):
 ## 
 ### SLASH COMMANDS ###################################################################################################################
 ##
-
+"""
 @bot.slash_command(name="gift", description="Generate Hoyoverse gift links for GI or HSR")
 async def gift_slash(ctx: discord.ApplicationContext, game: str, codes: str):
     game = game.lower()
@@ -414,7 +414,7 @@ async def gift_slash(ctx: discord.ApplicationContext, game: str, codes: str):
         links.append(f"{code}: {url}")
 
     await ctx.respond("\n".join(links))
-
+"""
 # TEXT RESPONSES
 @bot.event
 async def on_message(message):
@@ -651,7 +651,10 @@ peace_os_path = ""
 def post_init(): #assembles character list that can be posted
     random.seed()
 
-    peace_os_path = os.join(os.getcwd(), "post")
+    peace_os_path = os.path.join(os.getcwd(), "post")
+
+    if not(os.path.exists(peace_os_path)):
+        sys.exit("Please remember to make a \"post\" directory.")
 
     for item in os.listdir(peace_os_path): #assumes url lists are in files "nilou.char"
         if len(item) <= 6: #input error checking
@@ -667,7 +670,7 @@ async def post(ctx, char_name = "nilou", count = 1): #the actual command
         return
     
     #check url file
-    my_file = open(os.join(peace_os_path, peace_character_list[char_name.lower()]))
+    my_file = open(os.path.join(peace_os_path, peace_character_list[char_name.lower()]))
 
     my_data = []
     for line in my_file:
