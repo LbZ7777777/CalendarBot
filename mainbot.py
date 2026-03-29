@@ -674,7 +674,7 @@ def post_init(): #assembles character list that can be posted
         if item[-5:] == ".char":
             peace_character_list[item[:-5].lower()] = item
 
-@bot.command
+@bot.command() #needs the parentheses, unlike @bot.event . . .
 async def post(ctx, char_name = "nilou", count = 1): #the actual command
     #check if character has an attached list of urls
     if not (char_name.lower() in peace_character_list):
@@ -682,6 +682,7 @@ async def post(ctx, char_name = "nilou", count = 1): #the actual command
         return
     
     #check url file
+    peace_os_path = os.path.join(os.getcwd(), "post") #variable seems to get wiped/reset after you leave post_init() . . . strange
     my_file = open(os.path.join(peace_os_path, peace_character_list[char_name.lower()]))
 
     my_data = []
